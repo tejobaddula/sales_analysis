@@ -403,23 +403,39 @@ def get_snowflake_token():
 
 
 def call_cortex_analyst(user_message: str) -> dict:
-    """Call Cortex Analyst via Snowflake REST API."""
+    """Call Cortex Analyst via Snowflake REST API using username/password auth."""
     try:
-        token = get_snowflake_token()
         account = SNOWFLAKE_ACCOUNT.replace("_", "-").lower()
-        url = f"https://{account}.snowflakecomputing.com/api/v2/cortex/analyst/message"
 
+        # Step 1: Get a Bearer token via Snowflake login endpoint
+        login_url = f"https://{account}.snowflakecomputing.com/session/v1/login-request"
+        login_payload = {
+            "data": {
+                "LOGIN_NAME": SNOWFLAKE_USER,
+                "PASSWORD": SNOWFLAKE_PASSWORD,
+                "ACCOUNT_NAME": SNOWFLAKE_ACCOUNT,
+            }
+        }
+        login_response = requests.post(login_url, json=login_payload, timeout=15)
+
+        if login_response.status_code != 200:
+            return {"success": False, "error": f"Auth failed: {login_response.text}"}
+
+        token = login_response.json().get("data", {}).get("token")
+        if not token:
+            return {"success": False, "error": "Could not retrieve session token from Snowflake."}
+
+        # Step 2: Call Cortex Analyst with Bearer token
+        url = f"https://{account}.snowflakecomputing.com/api/v2/cortex/analyst/message"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f'Snowflake Token="{token}"',
-            "X-Snowflake-Authorization-Token-Type": "KEYPAIR_JWT"
+            "Authorization": f"Bearer {token}",
+            "X-Snowflake-Authorization-Token-Type": "OAUTH"
         }
-
         payload = {
             "messages": [{"role": "user", "content": [{"type": "text", "text": user_message}]}],
             "semantic_model_file": SEMANTIC_MODEL_PATH,
         }
-
         response = requests.post(url, headers=headers, json=payload, timeout=30)
 
         if response.status_code < 400:
@@ -574,7 +590,6 @@ if st.session_state.page == "home":
     with right_col:
         img_left, img_center, img_right = st.columns([0.10, 0.95, 0.10])
         with img_center:
-            st.markdown("<div style='margin-top:-10px;'></div>", unsafe_allow_html=True)
             st.image("Image.png", use_container_width=True)
 
 elif st.session_state.page == "cx":
