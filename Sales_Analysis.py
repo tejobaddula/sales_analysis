@@ -417,19 +417,8 @@ def call_cortex_analyst(user_message: str) -> dict:
         # Escape single quotes in the message
         safe_message = user_message.replace("'", "''")
 
-        # Call Cortex Analyst via SQL function
-        sql = f"""
-            SELECT SNOWFLAKE.CORTEX.COMPLETE(
-                'mistral-large2',
-                ARRAY_CONSTRUCT(
-                    OBJECT_CONSTRUCT('role', 'system', 'content',
-                        'You are a data analyst assistant for a food delivery platform.
-                        Answer questions about orders, revenue, merchants, NPS, and delivery performance.
-                        Always provide clear, concise answers with specific numbers when possible.'),
-                    OBJECT_CONSTRUCT('role', 'user', 'content', '{safe_message}')
-                )
-            ) AS response
-        """
+        # Call Cortex Complete via SQL — correct syntax for connector
+        sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', '{safe_message}') AS response"
 
         cursor = conn.cursor()
         cursor.execute(sql)
