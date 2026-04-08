@@ -13,7 +13,7 @@ st.set_page_config(page_title="Zipline Sales Dashboard", layout="wide")
 # -------------------------
 # CORTEX ANALYST CONFIG
 # -------------------------
-SEMANTIC_MODEL_PATH = "@ORDERS_DB.ANALYTICS.ORDERS_STAGE/orders_stage/orders_semantic_model.yaml"
+SEMANTIC_MODEL_PATH = "@ORDERS_DB.ANALYTICS.ORDERS_STAGE/orders_semantic_model.yaml"
 SNOWFLAKE_ACCOUNT   = st.secrets["snowflake"]["account"]
 SNOWFLAKE_USER      = st.secrets["snowflake"]["user"]
 SNOWFLAKE_PASSWORD  = st.secrets["snowflake"]["password"]
