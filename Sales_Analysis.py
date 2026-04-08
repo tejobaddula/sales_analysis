@@ -402,38 +402,193 @@ def get_snowflake_token():
     return token
 
 
+# -------------------------
+# QUERY INTENT DETECTION
+# -------------------------
+QUERY_INTENTS = {
+    "total_revenue": {
+        "keywords": ["total net revenue", "total revenue", "net revenue", "revenue total"],
+        "sql": """
+            SELECT ROUND(SUM((subtotal * commission_rate) + fees - promotion), 2) AS total_net_revenue
+            FROM ORDERS
+        """,
+        "description": "Total net revenue across all orders"
+    },
+    "revenue_by_merchant": {
+        "keywords": ["revenue by merchant", "revenue per merchant", "merchant revenue", "revenue for each merchant"],
+        "sql": """
+            SELECT merchant, ROUND(SUM((subtotal * commission_rate) + fees - promotion), 2) AS net_revenue
+            FROM ORDERS
+            GROUP BY merchant
+            ORDER BY net_revenue DESC
+        """,
+        "description": "Net revenue broken down by merchant"
+    },
+    "cancellation_rate": {
+        "keywords": ["cancellation rate", "cancellation", "cancelled", "cancel rate"],
+        "sql": """
+            SELECT merchant,
+                   COUNT(*) AS total_orders,
+                   COUNT_IF(order_status != 'Successful') AS cancelled_orders,
+                   ROUND(COUNT_IF(order_status != 'Successful') * 100.0 / COUNT(*), 2) AS cancellation_rate_pct
+            FROM ORDERS
+            GROUP BY merchant
+            ORDER BY cancellation_rate_pct DESC
+        """,
+        "description": "Cancellation rate by merchant"
+    },
+    "avg_nps": {
+        "keywords": ["average nps", "avg nps", "nps by merchant", "nps per merchant", "nps score"],
+        "sql": """
+            SELECT merchant, ROUND(AVG(nps), 2) AS avg_nps
+            FROM ORDERS
+            GROUP BY merchant
+            ORDER BY avg_nps DESC
+        """,
+        "description": "Average NPS score by merchant"
+    },
+    "delivery_time": {
+        "keywords": ["delivery time", "delivery minutes", "how long", "longest delivery", "fastest delivery"],
+        "sql": """
+            SELECT merchant,
+                   ROUND(AVG(DATEDIFF('second', order_datetime, delivery_datetime) / 60.0), 2) AS avg_delivery_minutes
+            FROM ORDERS
+            GROUP BY merchant
+            ORDER BY avg_delivery_minutes DESC
+        """,
+        "description": "Average delivery time by merchant"
+    },
+    "daily_orders": {
+        "keywords": ["daily order", "orders per day", "order volume", "orders by day", "daily volume"],
+        "sql": """
+            SELECT DATE(order_datetime) AS order_date, COUNT(*) AS total_orders
+            FROM ORDERS
+            GROUP BY order_date
+            ORDER BY order_date
+        """,
+        "description": "Daily order volume"
+    },
+    "orders_by_merchant": {
+        "keywords": ["orders by merchant", "orders per merchant", "most orders", "top merchant"],
+        "sql": """
+            SELECT merchant, COUNT(*) AS total_orders
+            FROM ORDERS
+            GROUP BY merchant
+            ORDER BY total_orders DESC
+        """,
+        "description": "Total orders by merchant"
+    },
+    "total_orders": {
+        "keywords": ["total orders", "how many orders", "order count", "number of orders"],
+        "sql": """
+            SELECT COUNT(*) AS total_orders,
+                   COUNT_IF(order_status = 'Successful') AS successful_orders,
+                   COUNT_IF(order_status != 'Successful') AS cancelled_orders
+            FROM ORDERS
+        """,
+        "description": "Total order counts"
+    },
+    "unique_customers": {
+        "keywords": ["unique customers", "total customers", "how many customers", "number of customers"],
+        "sql": """
+            SELECT COUNT(DISTINCT user_id) AS unique_customers,
+                   ROUND(COUNT(*) * 1.0 / COUNT(DISTINCT user_id), 2) AS avg_orders_per_customer
+            FROM ORDERS
+        """,
+        "description": "Unique customer count and average orders per customer"
+    },
+    "monthly_revenue": {
+        "keywords": ["monthly revenue", "revenue by month", "month over month", "revenue trend"],
+        "sql": """
+            SELECT DATE_TRUNC('month', order_datetime) AS month,
+                   ROUND(SUM((subtotal * commission_rate) + fees - promotion), 2) AS net_revenue
+            FROM ORDERS
+            GROUP BY month
+            ORDER BY month
+        """,
+        "description": "Monthly revenue trend"
+    },
+    "january_orders": {
+        "keywords": ["january", "jan 2023"],
+        "sql": """
+            SELECT DATE(order_datetime) AS order_date, COUNT(*) AS total_orders
+            FROM ORDERS
+            WHERE order_datetime >= '2023-01-01' AND order_datetime < '2023-02-01'
+            GROUP BY order_date
+            ORDER BY order_date
+        """,
+        "description": "Daily orders for January 2023"
+    },
+}
+
+def detect_intent(user_message: str):
+    """Match user message to the best SQL query intent."""
+    msg = user_message.lower()
+    for intent_key, intent_data in QUERY_INTENTS.items():
+        for keyword in intent_data["keywords"]:
+            if keyword in msg:
+                return intent_key, intent_data
+    return None, None
+
+
 def call_cortex_analyst(user_message: str) -> dict:
-    """Call Cortex Analyst by running it via SQL through the connector."""
+    """Detect intent and run the matching SQL query against Snowflake."""
     try:
-        conn = snowflake.connector.connect(
-            user=st.secrets["snowflake"]["user"],
-            password=st.secrets["snowflake"]["password"],
-            account=st.secrets["snowflake"]["account"],
-            warehouse=st.secrets["snowflake"]["warehouse"],
-            database=st.secrets["snowflake"]["database"],
-            schema=st.secrets["snowflake"]["schema"]
-        )
+        intent_key, intent_data = detect_intent(user_message)
 
-        # Escape single quotes in the message
-        safe_message = user_message.replace("'", "''")
+        if intent_data:
+            conn = snowflake.connector.connect(
+                user=st.secrets["snowflake"]["user"],
+                password=st.secrets["snowflake"]["password"],
+                account=st.secrets["snowflake"]["account"],
+                warehouse=st.secrets["snowflake"]["warehouse"],
+                database=st.secrets["snowflake"]["database"],
+                schema=st.secrets["snowflake"]["schema"]
+            )
+            df = pd.read_sql(intent_data["sql"].strip(), conn)
+            conn.close()
 
-        # Call Cortex Complete via SQL — correct syntax for connector
-        sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', '{safe_message}') AS response"
-
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        result = cursor.fetchone()[0]
-        conn.close()
-
-        # Wrap in Cortex Analyst-like response format
-        return {
-            "success": True,
-            "data": {
-                "message": {
-                    "content": [{"type": "text", "text": result}]
+            return {
+                "success": True,
+                "data": {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": f"Here are the results for **{intent_data['description']}**:"},
+                            {"type": "sql", "statement": intent_data["sql"].strip(), "df": df}
+                        ]
+                    }
                 }
             }
-        }
+        else:
+            # Fallback: use Cortex Complete for unrecognised questions
+            conn = snowflake.connector.connect(
+                user=st.secrets["snowflake"]["user"],
+                password=st.secrets["snowflake"]["password"],
+                account=st.secrets["snowflake"]["account"],
+                warehouse=st.secrets["snowflake"]["warehouse"],
+                database=st.secrets["snowflake"]["database"],
+                schema=st.secrets["snowflake"]["schema"]
+            )
+            safe_message = user_message.replace("'", "''")
+            context = """You are a data analyst for a food delivery platform called Zipline.
+            The ORDERS table has: user_id, order_id, order_status, merchant, subtotal, tax, fees,
+            promotion, order_datetime, delivery_datetime, cancellation_reason, nps, commission_rate,
+            is_split_order, is_manual_reload, delivery_attempts, num_items.
+            Net revenue = (subtotal * commission_rate) + fees - promotion.
+            Data covers Q1 2023 with 15,000 orders and 20 merchants."""
+            sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', '{context} Question: {safe_message}') AS response"
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            result = cursor.fetchone()[0]
+            conn.close()
+            return {
+                "success": True,
+                "data": {
+                    "message": {
+                        "content": [{"type": "text", "text": result}]
+                    }
+                }
+            }
     except Exception as e:
         return {"success": False, "error": f"Error: {str(e)}"}
 
@@ -452,26 +607,30 @@ def render_analyst_response(response_data: dict):
             sql = block["statement"]
             with st.expander("🔍 View generated SQL", expanded=False):
                 st.code(sql, language="sql")
-            with st.spinner("Running query…"):
+            # Use pre-fetched df if available, otherwise run the SQL
+            df = block.get("df")
+            if df is None:
                 try:
                     df = run_sql(sql)
-                    st.success(f"✅ {len(df):,} row(s) returned")
-                    st.dataframe(df, use_container_width=True)
-                    num_cols  = df.select_dtypes(include="number").columns.tolist()
-                    str_cols  = df.select_dtypes(include="object").columns.tolist()
-                    date_cols = df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
-                    if str_cols and num_cols and len(df) <= 50:
-                        with st.expander("📊 Chart", expanded=True):
-                            fig = px.bar(df, x=str_cols[0], y=num_cols[0],
-                                         color_discrete_sequence=["#D32F2F"])
-                            st.plotly_chart(fig, use_container_width=True)
-                    elif date_cols and num_cols:
-                        with st.expander("📈 Trend", expanded=True):
-                            fig = px.line(df, x=date_cols[0], y=num_cols[0],
-                                          markers=True, color_discrete_sequence=["#FF4500"])
-                            st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
                     st.error(f"SQL error: {e}")
+                    df = None
+            if df is not None:
+                st.success(f"✅ {len(df):,} row(s) returned")
+                st.dataframe(df, use_container_width=True)
+                num_cols  = df.select_dtypes(include="number").columns.tolist()
+                str_cols  = df.select_dtypes(include="object").columns.tolist()
+                date_cols = df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
+                if str_cols and num_cols and len(df) <= 50:
+                    with st.expander("📊 Chart", expanded=True):
+                        fig = px.bar(df, x=str_cols[0], y=num_cols[0],
+                                     color_discrete_sequence=["#D32F2F"])
+                        st.plotly_chart(fig, use_container_width=True)
+                elif date_cols and num_cols:
+                    with st.expander("📈 Trend", expanded=True):
+                        fig = px.line(df, x=date_cols[0], y=num_cols[0],
+                                      markers=True, color_discrete_sequence=["#FF4500"])
+                        st.plotly_chart(fig, use_container_width=True)
         elif block_type == "suggestions":
             st.markdown("**💡 You might also ask:**")
             for s in block.get("suggestions", []):
