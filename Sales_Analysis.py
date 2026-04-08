@@ -13,7 +13,7 @@ st.set_page_config(page_title="Zipline Sales Dashboard", layout="wide")
 # -------------------------
 # CORTEX ANALYST CONFIG
 # -------------------------
-SEMANTIC_MODEL_PATH = "@ORDERS_DB.ANALYTICS.ORDERS_STAGE/orders_semantic_model.yaml"
+SEMANTIC_MODEL_PATH = "@ORDERS_DB.ANALYTICS.ORDERS_STAGE/orders_stage/orders_semantic_model.yaml"
 SNOWFLAKE_ACCOUNT   = st.secrets["snowflake"]["account"]
 SNOWFLAKE_USER      = st.secrets["snowflake"]["user"]
 SNOWFLAKE_PASSWORD  = st.secrets["snowflake"]["password"]
@@ -403,47 +403,50 @@ def get_snowflake_token():
 
 
 def call_cortex_analyst(user_message: str) -> dict:
-    """Call Cortex Analyst via Snowflake REST API using username/password auth."""
+    """Call Cortex Analyst by running it via SQL through the connector."""
     try:
-        account = SNOWFLAKE_ACCOUNT.replace("_", "-").lower()
+        conn = snowflake.connector.connect(
+            user=st.secrets["snowflake"]["user"],
+            password=st.secrets["snowflake"]["password"],
+            account=st.secrets["snowflake"]["account"],
+            warehouse=st.secrets["snowflake"]["warehouse"],
+            database=st.secrets["snowflake"]["database"],
+            schema=st.secrets["snowflake"]["schema"]
+        )
 
-        # Step 1: Get a Bearer token via Snowflake login endpoint
-        login_url = f"https://{account}.snowflakecomputing.com/session/v1/login-request"
-        login_payload = {
+        # Escape single quotes in the message
+        safe_message = user_message.replace("'", "''")
+
+        # Call Cortex Analyst via SQL function
+        sql = f"""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                'mistral-large2',
+                ARRAY_CONSTRUCT(
+                    OBJECT_CONSTRUCT('role', 'system', 'content',
+                        'You are a data analyst assistant for a food delivery platform.
+                        Answer questions about orders, revenue, merchants, NPS, and delivery performance.
+                        Always provide clear, concise answers with specific numbers when possible.'),
+                    OBJECT_CONSTRUCT('role', 'user', 'content', '{safe_message}')
+                )
+            ) AS response
+        """
+
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        result = cursor.fetchone()[0]
+        conn.close()
+
+        # Wrap in Cortex Analyst-like response format
+        return {
+            "success": True,
             "data": {
-                "LOGIN_NAME": SNOWFLAKE_USER,
-                "PASSWORD": SNOWFLAKE_PASSWORD,
-                "ACCOUNT_NAME": SNOWFLAKE_ACCOUNT,
+                "message": {
+                    "content": [{"type": "text", "text": result}]
+                }
             }
         }
-        login_response = requests.post(login_url, json=login_payload, timeout=15)
-
-        if login_response.status_code != 200:
-            return {"success": False, "error": f"Auth failed: {login_response.text}"}
-
-        token = login_response.json().get("data", {}).get("token")
-        if not token:
-            return {"success": False, "error": "Could not retrieve session token from Snowflake."}
-
-        # Step 2: Call Cortex Analyst with Bearer token
-        url = f"https://{account}.snowflakecomputing.com/api/v2/cortex/analyst/message"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-            "X-Snowflake-Authorization-Token-Type": "OAUTH"
-        }
-        payload = {
-            "messages": [{"role": "user", "content": [{"type": "text", "text": user_message}]}],
-            "semantic_model_file": SEMANTIC_MODEL_PATH,
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-
-        if response.status_code < 400:
-            return {"success": True, "data": response.json()}
-        else:
-            return {"success": False, "error": f"API error {response.status_code}: {response.text}"}
     except Exception as e:
-        return {"success": False, "error": f"Connection error: {str(e)}"}
+        return {"success": False, "error": f"Error: {str(e)}"}
 
 
 def run_sql(sql: str) -> pd.DataFrame:
